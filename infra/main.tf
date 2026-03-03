@@ -1,17 +1,15 @@
 terraform {
   required_version = ">= 1.6.0"
-
-  backend "s3" {
-    bucket  = "demo-backend-tfstate-317196639027"
-    key     = "demo-backend/infra/terraform.tfstate"
-    region  = "us-east-1"
-    encrypt = true
-  }
-
   required_providers {
     aws    = { source = "hashicorp/aws", version = "~> 5.0" }
     random = { source = "hashicorp/random", version = "~> 3.0" }
   }
+    backend "s3" {
+      bucket  = "demo-backend-tfstate-317196639027"
+      key     = "demo-backend/infra/terraform.tfstate"
+      region  = "us-east-1"
+      encrypt = true
+    }
 }
 
 provider "aws" { region = var.aws_region }
@@ -75,8 +73,7 @@ resource "aws_elastic_beanstalk_application" "app" {
 
 # Plataforma Java 17 en Amazon Linux 2 (obtenemos la más reciente que matchea)
 data "aws_elastic_beanstalk_solution_stack" "java17" {
-  # Java SE (no Tomcat)
-  name_regex  = "64bit Amazon Linux 2.*Corretto 17.*running Java"
+  name_regex  = "64bit Amazon Linux 2.*Corretto 17"
   most_recent = true
 }
 
