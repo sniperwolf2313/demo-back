@@ -32,8 +32,21 @@ jobs:
       - name: Terraform fmt
         run: terraform fmt -check
 
-      - name: Terraform init
-        run: terraform init
+      - name: Terraform init (read outputs)
+        working-directory: infra
+        run: terraform init -input=false
+
+      - name: Read Terraform outputs
+        id: tf
+        working-directory: infra
+        run: |
+          set -euo pipefail
+          BUCKET="$(terraform output -raw versions_bucket)"
+          APP="$(terraform output -raw app_name)"
+          ENV="$(terraform output -raw env_name)"
+          echo "bucket=$BUCKET" >> $GITHUB_OUTPUT
+          echo "app=$APP" >> $GITHUB_OUTPUT
+          echo "env=$ENV" >> $GITHUB_OUTPUT
 
       - name: Terraform validate
         run: terraform validate
