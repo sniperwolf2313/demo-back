@@ -1,0 +1,57 @@
+name: CI - Build, Test, Security
+
+on:
+  pull_request:
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  build-test-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Run tests
+        run: ./gradlew test
+
+      - name: Build jar
+        run: ./gradlew clean build -x test
+
+      # Opción A (real): Trivy FS scan (rápido)
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: "CRITICAL,HIGH"
+          ignore-unfixed: true
+          format: table
+        continue-on-error: true  # para demo: no bloquea
+
+      # Opción B (simulado): falla si detecta "vulnerable-lib" en build.gradle
+      - name: Simulated vuln check
+        run: |
+          if grep -qi "vulnerable-lib" build.gradle; then
+            echo "Simulated vulnerability found!"
+            exit 1
+          else
+            echo "Simulated vulnerability check passed."
+          fi
+
+      - name: Upload build artifact (jar)
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-jar
+          path: build/libs/*.jar
+          if-no-files-found: error
