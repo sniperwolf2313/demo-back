@@ -1,0 +1,168 @@
+name: Manual - Deploy to Elastic Beanstalk
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: "Opcional: run id del build."
+        required: false
+      version_label:
+        description: "Opcional: version label, usa el SHA del build."
+        required: false
+
+permissions:
+  id-token: write
+  contents: read
+  actions: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Resolve build run id (latest successful main if not provided)
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_RUN_ID: ${{ inputs.build_run_id }}
+          REPO: ${{ github.repository }}
+          WORKFLOW_NAME: "CI - Build"
+        run: |
+          set -euo pipefail
+
+          if [ -n "${INPUT_RUN_ID}" ]; then
+            echo "run_id=${INPUT_RUN_ID}" >> $GITHUB_OUTPUT
+            echo "Using provided run_id=${INPUT_RUN_ID}"
+            exit 0
+          fi
+
+          echo "Finding latest successful build on main for workflow: ${WORKFLOW_NAME}"
+
+          RUN_ID="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${REPO}/actions/workflows" \
+            --jq '.workflows[] | select(.name=="'${WORKFLOW_NAME}'") | .id' \
+          )"
+
+          if [ -z "${RUN_ID}" ]; then
+            echo "ERROR: Workflow '${WORKFLOW_NAME}' not found."
+            exit 1
+          fi
+
+          LATEST_RUN="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${REPO}/actions/workflows/${RUN_ID}/runs?branch=main&status=success&per_page=1" \
+            --jq '.workflow_runs[0].id' \
+          )"
+
+          if [ -z "${LATEST_RUN}" ] || [ "${LATEST_RUN}" = "null" ]; then
+            echo "ERROR: No successful runs found for workflow '${WORKFLOW_NAME}' on branch main."
+            exit 1
+          fi
+
+          echo "run_id=${LATEST_RUN}" >> $GITHUB_OUTPUT
+          echo "Resolved latest successful run_id=${LATEST_RUN}"
+
+      - name: Resolve build SHA for version label (if not provided)
+        id: sha
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ steps.resolve.outputs.run_id }}
+          INPUT_LABEL: ${{ inputs.version_label }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "${INPUT_LABEL}" ]; then
+            echo "label=${INPUT_LABEL}" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          SHA="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${REPO}/actions/runs/${RUN_ID}" \
+            --jq '.head_sha' \
+          )"
+
+          if [ -z "${SHA}" ] || [ "${SHA}" = "null" ]; then
+            echo "ERROR: Could not resolve head_sha for run ${RUN_ID}"
+            exit 1
+          fi
+
+          echo "label=${SHA}" >> $GITHUB_OUTPUT
+          echo "Using version label SHA=${SHA}"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.6.6"
+
+      - name: Terraform init (read outputs)
+        working-directory: infra
+        run: terraform init -input=false
+
+      - name: Read Terraform outputs
+        id: tf
+        working-directory: infra
+        run: |
+          set -euo pipefail
+          echo "bucket=$(terraform output -raw versions_bucket)" >> $GITHUB_OUTPUT
+          echo "app=$(terraform output -raw app_name)" >> $GITHUB_OUTPUT
+          echo "env=$(terraform output -raw env_name)" >> $GITHUB_OUTPUT
+
+      - name: Download build artifact (app-jar)
+        uses: actions/download-artifact@v4
+        with:
+          name: app-jar
+          path: artifact
+          run-id: ${{ steps.resolve.outputs.run_id }}
+
+      - name: Create EB bundle (zip) from artifact
+        run: |
+          set -euo pipefail
+          JAR_PATH="$(ls artifact/*.jar | head -n 1)"
+          mkdir -p bundle
+          cp "$JAR_PATH" bundle/app.jar
+
+          cat > bundle/Procfile <<'EOF'
+          web: java -Dserver.port=5000 -jar app.jar
+          EOF
+
+          (cd bundle && zip -r ../deploy.zip .)
+
+      - name: Upload bundle to S3
+        id: upload
+        run: |
+          set -euo pipefail
+          VERSION_LABEL="${{ steps.sha.outputs.label }}"
+          S3_KEY="releases/${VERSION_LABEL}.zip"
+
+          aws s3 cp deploy.zip "s3://${{ steps.tf.outputs.bucket }}/${S3_KEY}"
+
+          echo "version=${VERSION_LABEL}" >> $GITHUB_OUTPUT
+          echo "s3_key=${S3_KEY}" >> $GITHUB_OUTPUT
+
+      - name: Create EB application version
+        run: |
+          set -euo pipefail
+          aws elasticbeanstalk create-application-version \
+            --application-name "${{ steps.tf.outputs.app }}" \
+            --version-label "${{ steps.upload.outputs.version }}" \
+            --source-bundle S3Bucket="${{ steps.tf.outputs.bucket }}",S3Key="${{ steps.upload.outputs.s3_key }}" \
+            --process
+
+      - name: Update EB environment
+        run: |
+          set -euo pipefail
+          aws elasticbeanstalk update-environment \
+            --environment-name "${{ steps.tf.outputs.env }}" \
+            --version-label "${{ steps.upload.outputs.version }}"
