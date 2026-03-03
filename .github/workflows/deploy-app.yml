@@ -22,7 +22,7 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-
+      
       - name: Resolve build run id (latest successful main if not provided)
         id: resolve
         env:
@@ -32,39 +32,39 @@ jobs:
           WORKFLOW_NAME: "CI - Build, Test, Security"
         run: |
           set -euo pipefail
-
+      
           if [ -n "${INPUT_RUN_ID}" ]; then
             echo "run_id=${INPUT_RUN_ID}" >> $GITHUB_OUTPUT
             echo "Using provided run_id=${INPUT_RUN_ID}"
             exit 0
           fi
-
+      
           echo "Finding latest successful build on main for workflow: ${WORKFLOW_NAME}"
-
-          RUN_ID="$(gh api \
+      
+          WORKFLOW_ID="$(gh api \
             -H "Accept: application/vnd.github+json" \
             "/repos/${REPO}/actions/workflows" \
-            --jq '.workflows[] | select(.name=="'${WORKFLOW_NAME}'") | .id' \
-          )"
-
-          if [ -z "${RUN_ID}" ]; then
-            echo "ERROR: Workflow '${WORKFLOW_NAME}' not found."
+            | jq -r --arg name "${WORKFLOW_NAME}" '.workflows[] | select(.name==$name) | .id' \
+            | head -n 1)"
+      
+          if [ -z "${WORKFLOW_ID}" ] || [ "${WORKFLOW_ID}" = "null" ]; then
+            echo "ERROR: Workflow '${WORKFLOW_NAME}' not found in repo ${REPO}."
             exit 1
           fi
-
-          LATEST_RUN="$(gh api \
+      
+          # 2) Tomar el último run exitoso en main
+          LATEST_RUN_ID="$(gh api \
             -H "Accept: application/vnd.github+json" \
-            "/repos/${REPO}/actions/workflows/${RUN_ID}/runs?branch=main&status=success&per_page=1" \
-            --jq '.workflow_runs[0].id' \
-          )"
-
-          if [ -z "${LATEST_RUN}" ] || [ "${LATEST_RUN}" = "null" ]; then
+            "/repos/${REPO}/actions/workflows/${WORKFLOW_ID}/runs?branch=main&status=success&per_page=1" \
+            | jq -r '.workflow_runs[0].id')"
+      
+          if [ -z "${LATEST_RUN_ID}" ] || [ "${LATEST_RUN_ID}" = "null" ]; then
             echo "ERROR: No successful runs found for workflow '${WORKFLOW_NAME}' on branch main."
             exit 1
           fi
-
-          echo "run_id=${LATEST_RUN}" >> $GITHUB_OUTPUT
-          echo "Resolved latest successful run_id=${LATEST_RUN}"
+      
+          echo "run_id=${LATEST_RUN_ID}" >> $GITHUB_OUTPUT
+          echo "Resolved latest successful run_id=${LATEST_RUN_ID}"
 
       - name: Resolve build SHA for version label (if not provided)
         id: sha
@@ -75,23 +75,22 @@ jobs:
           INPUT_LABEL: ${{ inputs.version_label }}
         run: |
           set -euo pipefail
-
+      
           if [ -n "${INPUT_LABEL}" ]; then
             echo "label=${INPUT_LABEL}" >> $GITHUB_OUTPUT
             exit 0
           fi
-
+      
           SHA="$(gh api \
             -H "Accept: application/vnd.github+json" \
             "/repos/${REPO}/actions/runs/${RUN_ID}" \
-            --jq '.head_sha' \
-          )"
-
+            | jq -r '.head_sha')"
+      
           if [ -z "${SHA}" ] || [ "${SHA}" = "null" ]; then
             echo "ERROR: Could not resolve head_sha for run ${RUN_ID}"
             exit 1
           fi
-
+      
           echo "label=${SHA}" >> $GITHUB_OUTPUT
           echo "Using version label SHA=${SHA}"
 
