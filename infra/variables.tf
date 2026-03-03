@@ -1,5 +1,5 @@
 variable "project" {
-  type = string
+  type    = string
   default = "demo-backend-project"
 }
 
