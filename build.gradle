@@ -1,0 +1,22 @@
+plugins {
+    id 'org.springframework.boot' version '2.7.18'
+    id 'io.spring.dependency-management' version '1.0.15.RELEASE'
+    id 'java'
+}
+
+group = 'demo.com.co'
+version = '1.0-SNAPSHOT'
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    testImplementation platform('org.junit:junit-bom:5.10.0')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+}
+
+test {
+    useJUnitPlatform()
+}
