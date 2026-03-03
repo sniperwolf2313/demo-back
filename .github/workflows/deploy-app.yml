@@ -99,12 +99,36 @@ jobs:
           echo "label=${SHA}" >> $GITHUB_OUTPUT
           echo "Using version label SHA=${SHA}"
 
-      - name: Download build artifact (app-jar)
-        uses: actions/download-artifact@v4
-        with:
-          name: app-jar
-          path: artifact
-          run-id: ${{ steps.resolve.outputs.run_id }}
+      - name: Download app-jar artifact from build run (via API)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ steps.resolve.outputs.run_id }}
+        run: |
+          set -euo pipefail
+      
+          echo "Fetching artifacts for run: ${RUN_ID}"
+          ARTIFACT_ID="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${REPO}/actions/runs/${RUN_ID}/artifacts" \
+            | jq -r '.artifacts[] | select(.name=="app-jar") | .id' \
+            | head -n 1)"
+      
+          if [ -z "${ARTIFACT_ID}" ] || [ "${ARTIFACT_ID}" = "null" ]; then
+            echo "ERROR: Artifact 'app-jar' not found in run ${RUN_ID}"
+            gh api "/repos/${REPO}/actions/runs/${RUN_ID}/artifacts" | jq '.artifacts[] | {name,id,expired,created_at,size_in_bytes}'
+            exit 1
+          fi
+      
+          echo "Downloading artifact id=${ARTIFACT_ID}"
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${REPO}/actions/artifacts/${ARTIFACT_ID}/zip" \
+            > app-jar.zip
+      
+          mkdir -p artifact
+          unzip -o app-jar.zip -d artifact
+          ls -la artifact
 
       - name: Verify jar present
         run: |
