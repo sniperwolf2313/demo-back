@@ -1,5 +1,6 @@
 variable "project" {
   type = string
+  default = "demo-backend-project"
 }
 
 variable "aws_region" {
