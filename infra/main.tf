@@ -75,7 +75,8 @@ resource "aws_elastic_beanstalk_application" "app" {
 
 # Plataforma Java 17 en Amazon Linux 2 (obtenemos la más reciente que matchea)
 data "aws_elastic_beanstalk_solution_stack" "java17" {
-  name_regex  = "64bit Amazon Linux 2.*Corretto 17"
+  # Java SE (no Tomcat)
+  name_regex  = "64bit Amazon Linux 2.*Corretto 17.*running Java"
   most_recent = true
 }
 
