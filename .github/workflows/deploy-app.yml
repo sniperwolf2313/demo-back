@@ -1,13 +1,13 @@
-name: Manual - Deploy to Elastic Beanstalk
+name: Manual - Infra + Deploy to Elastic Beanstalk (uses build artifact)
 
 on:
   workflow_dispatch:
     inputs:
       build_run_id:
-        description: "Opcional: run id del build."
+        description: "Opcional: run id del workflow de build, usa el último build exitoso en main."
         required: false
       version_label:
-        description: "Opcional: version label, usa el SHA del build."
+        description: "Opcional: version label en EB, usa el SHA del build."
         required: false
 
 permissions:
@@ -15,58 +15,64 @@ permissions:
   contents: read
   actions: read
 
+concurrency:
+  group: manual-infra-deploy-eb
+  cancel-in-progress: false
+
 jobs:
-  deploy:
+  infra-deploy:
     runs-on: ubuntu-latest
 
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      TFSTATE_BUCKET: demo-backend-tfstate-317196639027
+      WORKFLOW_NAME: "CI - Build, Test, Security"
+
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
-      
-      - name: Resolve build run id (latest successful main if not provided)
+        
+      - name: Resolve build run id
         id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
           INPUT_RUN_ID: ${{ inputs.build_run_id }}
           REPO: ${{ github.repository }}
-          WORKFLOW_NAME: "CI - Build, Test, Security"
+          WF_NAME: ${{ env.WORKFLOW_NAME }}
         run: |
           set -euo pipefail
-      
+
           if [ -n "${INPUT_RUN_ID}" ]; then
             echo "run_id=${INPUT_RUN_ID}" >> $GITHUB_OUTPUT
             echo "Using provided run_id=${INPUT_RUN_ID}"
             exit 0
           fi
-      
-          echo "Finding latest successful build on main for workflow: ${WORKFLOW_NAME}"
-      
-          WORKFLOW_ID="$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            "/repos/${REPO}/actions/workflows" \
-            | jq -r --arg name "${WORKFLOW_NAME}" '.workflows[] | select(.name==$name) | .id' \
-            | head -n 1)"
-      
-          if [ -z "${WORKFLOW_ID}" ] || [ "${WORKFLOW_ID}" = "null" ]; then
-            echo "ERROR: Workflow '${WORKFLOW_NAME}' not found in repo ${REPO}."
-            exit 1
-          fi
-      
-          # 2) Tomar el último run exitoso en main
-          LATEST_RUN_ID="$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            "/repos/${REPO}/actions/workflows/${WORKFLOW_ID}/runs?branch=main&status=success&per_page=1" \
-            | jq -r '.workflow_runs[0].id')"
-      
-          if [ -z "${LATEST_RUN_ID}" ] || [ "${LATEST_RUN_ID}" = "null" ]; then
-            echo "ERROR: No successful runs found for workflow '${WORKFLOW_NAME}' on branch main."
-            exit 1
-          fi
-      
-          echo "run_id=${LATEST_RUN_ID}" >> $GITHUB_OUTPUT
-          echo "Resolved latest successful run_id=${LATEST_RUN_ID}"
 
-      - name: Resolve build SHA for version label (if not provided)
+          echo "Finding latest successful build on main for workflow: ${WF_NAME}"
+
+          WF_ID="$(gh api "/repos/${REPO}/actions/workflows" \
+            -H "Accept: application/vnd.github+json" \
+            | jq -r --arg name "${WF_NAME}" '.workflows[] | select(.name==$name) | .id' \
+            | head -n 1)"
+
+          if [ -z "${WF_ID}" ] || [ "${WF_ID}" = "null" ]; then
+            echo "ERROR: Workflow '${WF_NAME}' not found."
+            exit 1
+          fi
+
+          RUN_ID="$(gh api "/repos/${REPO}/actions/workflows/${WF_ID}/runs?branch=main&status=success&per_page=1" \
+            -H "Accept: application/vnd.github+json" \
+            | jq -r '.workflow_runs[0].id')"
+
+          if [ -z "${RUN_ID}" ] || [ "${RUN_ID}" = "null" ]; then
+            echo "ERROR: No successful runs found for workflow '${WF_NAME}' on branch main."
+            exit 1
+          fi
+
+          echo "run_id=${RUN_ID}" >> $GITHUB_OUTPUT
+          echo "Resolved run_id=${RUN_ID}"
+
+      - name: Resolve build SHA
         id: sha
         env:
           GH_TOKEN: ${{ github.token }}
@@ -75,48 +81,23 @@ jobs:
           INPUT_LABEL: ${{ inputs.version_label }}
         run: |
           set -euo pipefail
-      
+
           if [ -n "${INPUT_LABEL}" ]; then
             echo "label=${INPUT_LABEL}" >> $GITHUB_OUTPUT
             exit 0
           fi
-      
-          SHA="$(gh api \
+
+          SHA="$(gh api "/repos/${REPO}/actions/runs/${RUN_ID}" \
             -H "Accept: application/vnd.github+json" \
-            "/repos/${REPO}/actions/runs/${RUN_ID}" \
             | jq -r '.head_sha')"
-      
+
           if [ -z "${SHA}" ] || [ "${SHA}" = "null" ]; then
             echo "ERROR: Could not resolve head_sha for run ${RUN_ID}"
             exit 1
           fi
-      
+
           echo "label=${SHA}" >> $GITHUB_OUTPUT
           echo "Using version label SHA=${SHA}"
-
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: "1.6.6"
-
-      - name: Terraform init (read outputs)
-        working-directory: infra
-        run: terraform init -input=false
-
-      - name: Read Terraform outputs
-        id: tf
-        working-directory: infra
-        run: |
-          set -euo pipefail
-          echo "bucket=$(terraform output -raw versions_bucket)" >> $GITHUB_OUTPUT
-          echo "app=$(terraform output -raw app_name)" >> $GITHUB_OUTPUT
-          echo "env=$(terraform output -raw env_name)" >> $GITHUB_OUTPUT
 
       - name: Download build artifact (app-jar)
         uses: actions/download-artifact@v4
@@ -125,10 +106,81 @@ jobs:
           path: artifact
           run-id: ${{ steps.resolve.outputs.run_id }}
 
+      - name: Verify jar present
+        run: |
+          set -euo pipefail
+          ls -la artifact
+          ls artifact/*.jar >/dev/null
+
+      # 4) Auth AWS
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Ensure tfstate bucket exists
+        run: |
+          set -euo pipefail
+          if aws s3api head-bucket --bucket "${TFSTATE_BUCKET}" 2>/dev/null; then
+            echo "tfstate bucket exists: ${TFSTATE_BUCKET}"
+          else
+            echo "Creating tfstate bucket: ${TFSTATE_BUCKET}"
+            aws s3api create-bucket --bucket "${TFSTATE_BUCKET}" --region "${AWS_REGION}"
+          fi
+
+          aws s3api put-bucket-versioning \
+            --bucket "${TFSTATE_BUCKET}" \
+            --versioning-configuration Status=Enabled
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.6.6"
+
+      - name: Terraform init
+        working-directory: infra
+        run: terraform init -input=false
+
+      - name: Terraform validate
+        working-directory: infra
+        run: terraform validate
+
+      - name: Terraform plan
+        working-directory: infra
+        run: terraform plan -input=false -lock-timeout=2m -out=tfplan
+
+      - name: Terraform apply
+        working-directory: infra
+        run: terraform apply -input=false -lock-timeout=2m -auto-approve tfplan
+
+      - name: Read Terraform outputs
+        id: tf
+        working-directory: infra
+        run: |
+          set -euo pipefail
+          terraform output -json > /tmp/tf-outputs.json
+
+          BUCKET="$(jq -r '.versions_bucket.value' /tmp/tf-outputs.json)"
+          APP="$(jq -r '.app_name.value' /tmp/tf-outputs.json)"
+          ENV="$(jq -r '.env_name.value' /tmp/tf-outputs.json)"
+
+          if [ -z "$BUCKET" ] || [ "$BUCKET" = "null" ]; then
+            echo "ERROR: No Terraform outputs found (check outputs.tf + backend state)."
+            cat /tmp/tf-outputs.json
+            exit 1
+          fi
+
+          echo "bucket=$BUCKET" >> $GITHUB_OUTPUT
+          echo "app=$APP" >> $GITHUB_OUTPUT
+          echo "env=$ENV" >> $GITHUB_OUTPUT
+
+      # 8) Crear ZIP para EB desde el JAR descargado
       - name: Create EB bundle (zip) from artifact
         run: |
           set -euo pipefail
           JAR_PATH="$(ls artifact/*.jar | head -n 1)"
+
           mkdir -p bundle
           cp "$JAR_PATH" bundle/app.jar
 
@@ -138,6 +190,7 @@ jobs:
 
           (cd bundle && zip -r ../deploy.zip .)
 
+      # 9) Subir zip a S3 versions bucket + crear EB version + update env
       - name: Upload bundle to S3
         id: upload
         run: |
