@@ -29,7 +29,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           INPUT_RUN_ID: ${{ inputs.build_run_id }}
           REPO: ${{ github.repository }}
-          WORKFLOW_NAME: "CI - Build"
+          WORKFLOW_NAME: "CI - Build, Test, Security"
         run: |
           set -euo pipefail
 
