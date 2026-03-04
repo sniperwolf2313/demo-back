@@ -1,8 +1,7 @@
-name: Deploy Spring Boot AWS
+name: Deploy Spring Boot AWS (OIDC + TF outputs)
 
 on:
-  push:
-    branches: ["main"]
+  workflow_dispatch:
 
 permissions:
   id-token: write
@@ -30,16 +29,16 @@ jobs:
 
       - name: Package EB app
         run: |
+          set -euo pipefail
           JAR=$(ls build/libs/*.jar | head -n 1)
-          mkdir bundle
-          cp $JAR bundle/app.jar
+          mkdir -p bundle
+          cp "$JAR" bundle/app.jar
 
-          cat <<EOF > bundle/Procfile
+          cat <<'EOF' > bundle/Procfile
           web: java -Dserver.port=5000 -jar app.jar
           EOF
 
-          cd bundle
-          zip -r ../app.zip .
+          (cd bundle && zip -r ../app.zip .)
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -49,6 +48,8 @@ jobs:
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.6.6"
 
       - name: Terraform init
         working-directory: infra
@@ -58,19 +59,43 @@ jobs:
         working-directory: infra
         run: terraform apply -auto-approve
 
-      - name: Upload app to S3
+      - name: Read Terraform outputs
+        id: tf
+        working-directory: infra
         run: |
-          aws s3 cp app.zip s3://${{ secrets.EB_VERSIONS_BUCKET }}/app.zip
+          set -euo pipefail
+          echo "versions_bucket=$(terraform output -raw versions_bucket)" >> $GITHUB_OUTPUT
+          echo "app_name=$(terraform output -raw app_name)" >> $GITHUB_OUTPUT
+          echo "env_name=$(terraform output -raw env_name)" >> $GITHUB_OUTPUT
+          echo "env_url=$(terraform output -raw env_url)" >> $GITHUB_OUTPUT
 
-      - name: Create EB version
+      - name: Upload app to S3 (versions bucket)
         run: |
+          set -euo pipefail
+          BUCKET="${{ steps.tf.outputs.versions_bucket }}"
+          aws s3 cp app.zip "s3://${BUCKET}/app.zip"
+
+      - name: Create EB application version
+        run: |
+          set -euo pipefail
+          APP="${{ steps.tf.outputs.app_name }}"
+          BUCKET="${{ steps.tf.outputs.versions_bucket }}"
+          VERSION="v-${{ github.run_number }}-${{ github.sha }}"
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
           aws elasticbeanstalk create-application-version \
-            --application-name ${{ secrets.EB_APPLICATION_NAME }} \
-            --version-label v-${{ github.run_number }} \
-            --source-bundle S3Bucket=${{ secrets.EB_VERSIONS_BUCKET }},S3Key=app.zip
+            --application-name "$APP" \
+            --version-label "$VERSION" \
+            --source-bundle S3Bucket="$BUCKET",S3Key="app.zip"
 
-      - name: Deploy to EB
+      - name: Deploy to EB environment
         run: |
+          set -euo pipefail
+          ENV="${{ steps.tf.outputs.env_name }}"
           aws elasticbeanstalk update-environment \
-            --environment-name ${{ secrets.EB_ENVIRONMENT_NAME }} \
-            --version-label v-${{ github.run_number }}
+            --environment-name "$ENV" \
+            --version-label "$VERSION"
+
+      - name: Print environment URL
+        run: |
+          echo "EB URL: http://${{ steps.tf.outputs.env_url }}"
